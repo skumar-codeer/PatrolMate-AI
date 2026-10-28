@@ -1,0 +1,301 @@
+/*
+  PatrolMate AI - ESP32-S3 Wireless Router + UART Bridge
+  Upload this sketch to ESP32-S3. It serves the wireless dashboard
+  and forwards commands to the existing Arduino UNO autonomous sketch.
+
+  UART wiring:
+    ESP32-S3 GPIO43 TX -> Arduino UNO D12 (SoftwareSerial RX)
+    Arduino UNO D13 (SoftwareSerial TX) -> level shifter -> ESP32-S3 GPIO44 RX
+    ESP32-S3 GND <-> Arduino UNO GND
+
+  IMPORTANT:
+    1. Fill in your Wi-Fi name/password below.
+    2. This sketch replaces the standalone UART test sketch on ESP32-S3.
+    3. It does NOT replace the Arduino UNO autonomous firmware.
+    4. Camera is a separate ESP32-CAM; enter its stream URL in the dashboard.
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+HardwareSerial RobotSerial(1);
+WebServer server(80);
+
+const int UART_RX_PIN = 44; // ESP32 receives from UNO D13 via level shifter
+const int UART_TX_PIN = 43; // ESP32 sends to UNO D12
+const uint32_t UART_BAUD = 9600;
+
+const char DASHBOARD_HTML[] PROGMEM = R"PATROLMATEHTML(
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PatrolMate AI — Wireless Console</title>
+<style>
+:root{color-scheme:dark;--bg:#09111b;--panel:#111d2b;--line:#2a3a4f;--txt:#e8f1fc;--muted:#91a4bb;--green:#49d6a0;--red:#ff647c;--amber:#ffca76;--blue:#72baff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#142b43,#09111b 58%);color:var(--txt);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line);background:#09111be8;position:sticky;top:0;z-index:2}.brand{display:flex;gap:12px;align-items:center}.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#168a68,#2869b8);display:grid;place-items:center;font-weight:900;font-size:18px}.brand h1{font-size:17px;margin:0}.brand p{margin:3px 0 0;color:var(--muted);font-size:12px}.pill{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:var(--muted);font-size:12px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#728197;margin-right:6px}.good .dot{background:var(--green)}.bad .dot{background:var(--red)}main{max-width:1250px;margin:auto;padding:18px;display:grid;gap:15px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.panel{min-width:0;background:linear-gradient(180deg,#132031,#0e1825);border:1px solid var(--line);border-radius:15px;overflow:hidden}.head{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}.head h2{margin:0;font-size:13px;letter-spacing:.5px}.body{padding:15px}.muted{color:var(--muted)}.small{font-size:12px}.row{display:flex;gap:8px;align-items:center}.row>*{min-width:0}.row input{flex:1}input,button{font:inherit;border-radius:9px;border:1px solid #354a62;padding:10px;background:#091421;color:var(--txt)}button{cursor:pointer;background:#1b2d41;font-size:12px;font-weight:700}button:hover{filter:brightness(1.16)}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#14684f;border-color:#218c6a}.danger{background:#632334;border-color:#91364c}.camera{aspect-ratio:16/9;background:#05080d;display:grid;place-items:center;position:relative;overflow:hidden}.camera img{display:none;width:100%;height:100%;object-fit:contain}.placeholder{text-align:center;color:#879bb1;padding:20px}.placeholder strong{display:block;color:#d7e5f5;margin:7px}.camtag{position:absolute;top:10px;left:10px;background:#07101cdb;border:1px solid #34485e;border-radius:7px;padding:5px 8px;font-size:11px}.controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:330px;margin:8px auto 14px}.controls button{min-height:54px;font-size:13px}.empty{visibility:hidden}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.metric{border:1px solid var(--line);background:#0a1420;border-radius:10px;padding:12px}.metric .label{font-size:11px;color:var(--muted)}.metric .value{font-size:19px;font-weight:800;margin-top:5px;overflow-wrap:anywhere}.log{background:#060c13;border:1px solid #223247;border-radius:9px;padding:10px;height:180px;overflow:auto;font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.warn{color:var(--amber)}.actions{display:flex;gap:8px;flex-wrap:wrap}.note{border:1px solid #57462a;background:#241d12;color:#e6c992;border-radius:10px;padding:11px;font-size:12px}.footer{text-align:center;color:#71849a;font-size:11px;padding:4px}@media(max-width:760px){.grid{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}main{padding:10px}.metrics{grid-template-columns:1fr 1fr}.row{flex-wrap:wrap}}
+</style></head>
+<body>
+<header><div class="brand"><div class="logo">PM</div><div><h1>PATROLMATE AI</h1><p>Wireless hardware console · Wi-Fi + UART</p></div></div><span class="pill" id="connection"><i class="dot"></i>Checking ESP32…</span></header>
+<main>
+<div class="metrics">
+ <div class="metric"><div class="label">WIRELESS LINK</div><div class="value" id="linkValue">Checking…</div></div>
+ <div class="metric"><div class="label">LAST COMMAND</div><div class="value" id="lastCmd">—</div></div>
+ <div class="metric"><div class="label">ARDUINO UART</div><div class="value" id="arduinoStatus">Waiting</div></div>
+</div>
+<div class="grid">
+<section class="panel"><div class="head"><h2>01 / CAMERA STREAM</h2><span class="pill" id="camStatus">Not connected</span></div>
+ <div class="camera"><img id="camImg" alt="Camera stream"><div class="placeholder" id="camPlaceholder">◉<strong>Camera not connected</strong><span class="small">Enter the separate ESP32-CAM stream URL.</span></div><span class="camtag">ESP32-CAM</span></div>
+ <div class="body"><label class="small muted" for="camUrl">Camera stream URL</label><div class="row" style="margin-top:6px"><input id="camUrl" placeholder="http://192.168.1.50:81/stream"><button class="primary" id="camConnect">Connect</button><button id="camStop">Stop</button></div><p class="small muted">Use the actual IP and stream endpoint for your ESP32-CAM firmware. Camera must be on the same reachable Wi-Fi network.</p></div>
+</section>
+<section class="panel"><div class="head"><h2>02 / ROBOT CONTROL</h2><span class="pill">Wireless</span></div><div class="body">
+ <p class="small muted">Commands go from this page → ESP32-S3 Wi-Fi → UART → Arduino UNO.</p>
+ <div class="controls"><span class="empty"></span><button data-cmd="F">▲ FORWARD</button><span class="empty"></span><button data-cmd="L">◀ LEFT</button><button class="danger" data-cmd="S">■ STOP</button><button data-cmd="R">RIGHT ▶</button><span class="empty"></span><button data-cmd="B">▼ BACKWARD</button><span class="empty"></span></div>
+ <div class="actions"><button class="primary" data-cmd="START_PATROL">START AUTO PATROL</button><button class="danger" data-cmd="STOP_PATROL">STOP PATROL</button></div>
+ <div class="note" style="margin-top:13px">Test with wheels raised first. STOP is sent over Wi-Fi; it is not a hardware emergency-stop circuit. If Wi-Fi fails, the browser cannot guarantee a stop.</div>
+</div></section>
+</div>
+<div class="grid">
+<section class="panel"><div class="head"><h2>03 / TELEMETRY</h2><button id="refresh">Refresh</button></div><div class="body"><div class="metrics">
+ <div class="metric"><div class="label">FRONT DISTANCE</div><div class="value" id="front">— <span class="small">cm</span></div></div>
+ <div class="metric"><div class="label">REAR DISTANCE</div><div class="value" id="rear">— <span class="small">cm</span></div></div>
+ <div class="metric"><div class="label">PATROL MODE</div><div class="value" id="mode">Unknown</div></div>
+</div><p class="small muted">Distances appear only if the Arduino sends them back over UART. Current Arduino sketch may print distances to USB Serial only; if so, telemetry fields remain unavailable until firmware forwards them to RobotSerial.</p></div></section>
+<section class="panel"><div class="head"><h2>04 / EVENT LOG</h2><button id="clearLog">Clear</button></div><div class="body"><div class="log" id="log">[SYSTEM] Wireless dashboard loaded.</div></div></section>
+</div>
+<div class="footer">PatrolMate AI · Keep an accessible physical power cutoff during testing.</div>
+</main>
+<script>
+(() => {
+ const $=id=>document.getElementById(id);
+ function addLog(s){const el=$('log');el.textContent+=`\n[${new Date().toLocaleTimeString()}] ${s}`;el.scrollTop=el.scrollHeight;}
+ async function api(path, options={}) {
+   const r=await fetch(path,{cache:'no-store',...options});
+   if(!r.ok) throw new Error(`HTTP ${r.status}`);
+   return r.json();
+ }
+ async function sendCommand(cmd){
+   try{
+     const result=await api('/api/cmd?cmd='+encodeURIComponent(cmd),{method:'POST'});
+     $('lastCmd').textContent=cmd;
+     addLog(`TX ${cmd} → ${result.message||'accepted'}`);
+     await refreshStatus();
+   }catch(e){addLog(`ERROR sending ${cmd}: ${e.message}`);alert('Command failed. Check that this page is opened from the ESP32-S3 web address and the robot is on Wi-Fi.');}
+ }
+ async function refreshStatus(){
+   try{
+     const s=await api('/api/status');
+     $('linkValue').textContent='ONLINE';
+     $('arduinoStatus').textContent=s.uart==='connected'?'UART active':'UART ready';
+     $('mode').textContent=s.patrol?'AUTO':'MANUAL/STOP';
+     if(s.lastCommand)$('lastCmd').textContent=s.lastCommand;
+     if(s.front!=null)$('front').textContent=s.front+' cm';
+     if(s.rear!=null)$('rear').textContent=s.rear+' cm';
+     $('connection').className='pill good';
+     $('connection').innerHTML='<i class="dot"></i>ESP32-S3 online';
+   }catch(e){
+     $('linkValue').textContent='OFFLINE';
+     $('connection').className='pill bad';
+     $('connection').innerHTML='<i class="dot"></i>ESP32 unreachable';
+   }
+ }
+ document.querySelectorAll('[data-cmd]').forEach(b=>b.addEventListener('click',()=>sendCommand(b.dataset.cmd)));
+ $('refresh').addEventListener('click',refreshStatus);
+ $('clearLog').addEventListener('click',()=>$('log').textContent='[SYSTEM] Log cleared.');
+ $('camConnect').addEventListener('click',()=>{
+   const url=$('camUrl').value.trim();if(!url){alert('Enter ESP32-CAM stream URL');return;}
+   const img=$('camImg');img.style.display='block';$('camPlaceholder').style.display='none';$('camStatus').textContent='Connecting…';
+   img.onload=()=>{$('camStatus').textContent='Stream active';addLog('Camera stream connected');};
+   img.onerror=()=>{$('camStatus').textContent='Failed';img.style.display='none';$('camPlaceholder').style.display='block';addLog('Camera stream failed; check URL/network/endpoint');};
+   img.src=url;
+ });
+ $('camStop').addEventListener('click',()=>{$('camImg').src='';$('camImg').style.display='none';$('camPlaceholder').style.display='block';$('camStatus').textContent='Stopped';});
+ refreshStatus();setInterval(refreshStatus,2500);
+})();
+</script></body></html>
+)PATROLMATEHTML";
+
+String lastCommand = "";
+String lastArduinoMessage = "";
+String uartBuffer = "";
+bool patrolMode = false;
+unsigned long lastArduinoMessageAt = 0;
+long frontDistance = -1;
+long rearDistance = -1;
+
+void sendCorsHeaders() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Cache-Control", "no-store");
+}
+
+void handleRoot() {
+  sendCorsHeaders();
+  server.send_P(200, "text/html; charset=utf-8", DASHBOARD_HTML);
+}
+
+void handleOptions() {
+  sendCorsHeaders();
+  server.send(204);
+}
+
+void handleStatus() {
+  sendCorsHeaders();
+  String json = "{";
+  json += "\"wifi\":\"connected\",";
+  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"uart\":\"connected\",";
+  json += "\"patrol\":" + String(patrolMode ? "true" : "false") + ",";
+  json += "\"lastCommand\":\"" + lastCommand + "\",";
+  json += "\"lastArduinoMessage\":\"" + lastArduinoMessage + "\",";
+  json += "\"front\":";
+  json += (frontDistance >= 0 ? String(frontDistance) : String("null"));
+  json += ",\"rear\":";
+  json += (rearDistance >= 0 ? String(rearDistance) : String("null"));
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+bool allowedCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+  return cmd == "F" || cmd == "B" || cmd == "L" || cmd == "R" ||
+         cmd == "S" || cmd == "FORWARD" || cmd == "BACKWARD" ||
+         cmd == "LEFT" || cmd == "RIGHT" || cmd == "STOP" ||
+         cmd == "START_PATROL" || cmd == "STOP_PATROL" ||
+         cmd == "STATUS" || cmd == "EMERGENCY_STOP";
+}
+
+void handleCommand() {
+  sendCorsHeaders();
+
+  String cmd = server.arg("cmd");
+  cmd.trim();
+  cmd.toUpperCase();
+
+  if (!allowedCommand(cmd)) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"message\":\"Unsupported command\"}");
+    return;
+  }
+
+  // Forward newline-terminated commands; UNO firmware reads commands by line.
+  RobotSerial.println(cmd);
+  lastCommand = cmd;
+
+  if (cmd == "START_PATROL") patrolMode = true;
+  if (cmd == "STOP_PATROL" || cmd == "STOP" ||
+      cmd == "S" || cmd == "EMERGENCY_STOP") {
+    patrolMode = false;
+  }
+
+  Serial.print("Wi-Fi command -> Arduino UART: ");
+  Serial.println(cmd);
+
+  String json = "{\"ok\":true,\"message\":\"Command forwarded\",\"command\":\"";
+  json += cmd;
+  json += "\"}";
+  server.send(200, "application/json", json);
+}
+
+void parseArduinoLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  lastArduinoMessage = line;
+  lastArduinoMessageAt = millis();
+
+  Serial.print("Arduino UART -> ");
+  Serial.println(line);
+
+  // Parse lines like FRONT:42 REAR:80 if the UNO sends them over UART.
+  int f = line.indexOf("FRONT:");
+  if (f >= 0) {
+    int start = f + 6;
+    int end = line.indexOf(' ', start);
+    String v = (end >= 0) ? line.substring(start, end) : line.substring(start);
+    frontDistance = v.toInt();
+  }
+
+  int r = line.indexOf("REAR:");
+  if (r >= 0) {
+    int start = r + 5;
+    int end = line.indexOf(' ', start);
+    String v = (end >= 0) ? line.substring(start, end) : line.substring(start);
+    rearDistance = v.toInt();
+  }
+
+  if (line.indexOf("PATROL:STARTED") >= 0) patrolMode = true;
+  if (line.indexOf("PATROL:STOPPED") >= 0 ||
+      line.indexOf("AUTO:BLOCKED") >= 0) patrolMode = false;
+}
+
+void readArduinoUART() {
+  while (RobotSerial.available()) {
+    char c = (char)RobotSerial.read();
+    if (c == '\r') continue;
+
+    if (c == '\n') {
+      parseArduinoLine(uartBuffer);
+      uartBuffer = "";
+    } else if (uartBuffer.length() < 240) {
+      uartBuffer += c;
+    } else {
+      uartBuffer = "";
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  RobotSerial.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {
+    delay(400);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected.");
+    Serial.print("Dashboard URL: http://");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Wi-Fi connection failed. Check SSID/password and 2.4 GHz network.");
+  }
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/cmd", HTTP_POST, handleCommand);
+  server.on("/api/cmd", HTTP_GET, handleCommand); // convenient for basic testing
+  server.on("/api/cmd", HTTP_OPTIONS, handleOptions);
+  server.on("/api/status", HTTP_OPTIONS, handleOptions);
+  server.begin();
+
+  Serial.println("HTTP server started.");
+  RobotSerial.println("STATUS");
+}
+
+void loop() {
+  server.handleClient();
+  readArduinoUART();
+
+  // Reconnect Wi-Fi if router briefly disappears.
+  static unsigned long lastReconnectAttempt = 0;
+  if (WiFi.status() != WL_CONNECTED &&
+      millis() - lastReconnectAttempt > 5000) {
+    lastReconnectAttempt = millis();
+    WiFi.reconnect();
+  }
+}
